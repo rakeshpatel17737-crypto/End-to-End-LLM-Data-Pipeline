@@ -11,9 +11,8 @@ class APIConfig(BaseSettings):
     redis_host: str = "localhost"
     redis_port: int = 6379
 
-    openai_api_key: str = ""
-    anthropic_api_key: str = ""
-    anthropic_model: str = "claude-sonnet-4-6"
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.3-70b-versatile"
 
     duckdb_path: str = "/data/warehouse/llm_logs.duckdb"
     log_level: str = "INFO"

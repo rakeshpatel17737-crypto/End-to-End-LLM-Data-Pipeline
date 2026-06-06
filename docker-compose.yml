@@ -1,5 +1,7 @@
 x-airflow-common: &airflow-common
-  image: apache/airflow:2.9.2-python3.11
+  build:
+    context: .
+    dockerfile: docker/Dockerfile.airflow
   environment:
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${AIRFLOW_DB}
@@ -14,8 +16,8 @@ x-airflow-common: &airflow-common
     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     REDIS_HOST: redis
     REDIS_PORT: "6379"
-    OPENAI_API_KEY: ${OPENAI_API_KEY}
-    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    GROQ_API_KEY: ${GROQ_API_KEY}
+    GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
     DUCKDB_PATH: /data/warehouse/llm_logs.duckdb
     DAILY_COST_BUDGET_USD: ${DAILY_COST_BUDGET_USD:-10.0}
     PYTHONPATH: /opt/llm_platform
@@ -24,11 +26,23 @@ x-airflow-common: &airflow-common
     - airflow-logs:/opt/airflow/logs
     - ./:/opt/llm_platform
     - warehouse-data:/data/warehouse
+  user: "50000:0"
   depends_on:
     postgres:
       condition: service_healthy
+    volume-init:
+      condition: service_completed_successfully
 
 services:
+  # One-shot: make the shared DuckDB warehouse volume writable by the airflow UID (50000),
+  # which the API container also runs as. Avoids cross-container permission conflicts.
+  volume-init:
+    image: busybox
+    container_name: ldp-volume-init
+    command: sh -c "mkdir -p /data/warehouse && chown -R 50000:0 /data/warehouse && chmod -R 775 /data/warehouse"
+    volumes:
+      - warehouse-data:/data/warehouse
+
   postgres:
     image: pgvector/pgvector:pg16
     container_name: ldp-postgres
@@ -39,8 +53,8 @@ services:
       POSTGRES_MULTIPLE_DATABASES: ${AIRFLOW_DB}
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./docker/init-airflow-db.sql:/docker-entrypoint-initdb.d/00-airflow-db.sql
       - ./docker/init-postgres.sql:/docker-entrypoint-initdb.d/01-init.sql
-      - ./docker/init-airflow-db.sh:/docker-entrypoint-initdb.d/00-airflow-db.sh
     ports:
       - "5432:5432"
     healthcheck:
@@ -76,9 +90,6 @@ services:
     command:
       - -c
       - |
-        pip install --quiet openai anthropic pgvector psycopg2-binary pymupdf \
-          langdetect datasketch tenacity structlog duckdb httpx beautifulsoup4 \
-          tiktoken numpy pandas
         airflow db migrate
         airflow users create \
           --username admin --firstname Admin --lastname User \
@@ -121,6 +132,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile.api
     container_name: ldp-api
+    user: "50000:0"
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
@@ -129,11 +141,15 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       REDIS_HOST: redis
       REDIS_PORT: "6379"
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
       DUCKDB_PATH: /data/warehouse/llm_logs.duckdb
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       ENVIRONMENT: ${ENVIRONMENT:-development}
+      HOME: /tmp
+      USER: appuser
+      HF_HOME: /tmp/hf
+      SENTENCE_TRANSFORMERS_HOME: /tmp/hf
     ports:
       - "8000:8000"
     depends_on:
@@ -141,6 +157,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      volume-init:
+        condition: service_completed_successfully
     volumes:
       - ./api:/app/api
       - ./embeddings:/app/embeddings

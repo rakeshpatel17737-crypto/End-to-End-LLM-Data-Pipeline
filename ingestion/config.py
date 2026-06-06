@@ -11,8 +11,7 @@ class IngestionConfig(BaseSettings):
     redis_host: str = "localhost"
     redis_port: int = 6379
 
-    openai_api_key: str = ""
-    anthropic_api_key: str = ""
+    groq_api_key: str = ""
 
     duckdb_path: str = "/data/warehouse/llm_logs.duckdb"
     daily_cost_budget_usd: float = 10.0

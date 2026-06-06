@@ -9,9 +9,9 @@ from __future__ import annotations
 import uuid
 from contextlib import asynccontextmanager
 
-import anthropic
 import psycopg2
 import redis as redis_lib
+from groq import AsyncGroq
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pgvector.psycopg2 import register_vector
@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
     )
     _state["cache"] = EmbeddingCache(_state["redis"])
     _state["llm_logger"] = LLMLogger(config.duckdb_path)
-    _state["anthropic"] = anthropic.AsyncAnthropic(api_key=config.anthropic_api_key)
+    _state["groq"] = AsyncGroq(api_key=config.groq_api_key)
 
     logger.info("All connections initialized")
     yield
@@ -88,8 +88,8 @@ async def query(req: QueryRequest, request: Request):
             pg_conn=_state["pg_conn"],
             cache=_state["cache"],
             llm_logger=_state["llm_logger"],
-            anthropic_client=_state["anthropic"],
-            anthropic_model=config.anthropic_model,
+            groq_client=_state["groq"],
+            groq_model=config.groq_model,
             top_k=req.top_k,
             mmr_lambda=req.mmr_lambda,
             request_id=request_id,

@@ -17,7 +17,7 @@ def test_log_and_retrieve(logger):
     iid = logger.log(
         request_id="req-001",
         interaction_type="embedding",
-        model="text-embedding-3-small",
+        model="all-MiniLM-L6-v2",
         tokens_in=100,
         tokens_out=0,
         cost_usd=0.000002,
@@ -36,7 +36,7 @@ def test_daily_summary_increments(logger):
         logger.log(
             request_id="req-x",
             interaction_type="embedding",
-            model="text-embedding-3-small",
+            model="all-MiniLM-L6-v2",
             tokens_in=50,
             tokens_out=0,
             cost_usd=0.000001,
@@ -53,7 +53,7 @@ def test_budget_exceeded(logger, monkeypatch):
     logger.log(
         request_id="over",
         interaction_type="rag_query",
-        model="claude-sonnet-4-6",
+        model="llama-3.3-70b-versatile",
         tokens_in=1000,
         tokens_out=200,
         cost_usd=0.01,
@@ -66,7 +66,7 @@ def test_cached_status(logger):
     logger.log(
         request_id="r2",
         interaction_type="embedding",
-        model="text-embedding-3-small",
+        model="all-MiniLM-L6-v2",
         tokens_in=0,
         tokens_out=0,
         cost_usd=0.0,

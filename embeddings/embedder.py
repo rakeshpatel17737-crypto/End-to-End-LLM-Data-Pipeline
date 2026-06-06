@@ -1,13 +1,26 @@
-"""OpenAI batch embedder with Redis cache and DuckDB cost tracking."""
+"""Local embedder using sentence-transformers, with Redis cache and DuckDB logging.
+
+Embeddings run locally on CPU — no API key, zero cost. Token counts are approximated
+for the cost/usage dashboard; cost_usd is always 0.0 for local embeddings.
+"""
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
 
-import openai
-
 from .config import config
 from .embedding_cache import EmbeddingCache
+
+_model = None
+
+
+def _get_model():
+    """Lazy-load the sentence-transformers model (downloaded once, cached on disk)."""
+    global _model
+    if _model is None:
+        from sentence_transformers import SentenceTransformer
+        _model = SentenceTransformer(config.embedding_model)
+    return _model
 
 
 @dataclass
@@ -72,53 +85,44 @@ def _embed_misses(
     request_id: str,
     results: list,
 ) -> None:
-    client = openai.OpenAI(api_key=config.openai_api_key)
-    batch_size = config.max_batch_size
+    model = _get_model()
+    miss_texts = [texts[i] for i in miss_indices]
 
-    for batch_start in range(0, len(miss_indices), batch_size):
-        batch_idx = miss_indices[batch_start: batch_start + batch_size]
-        batch_texts = [texts[i] for i in batch_idx]
-        batch_chunk_ids = [chunk_ids[i] for i in batch_idx]
+    t0 = time.perf_counter()
+    embeddings = model.encode(
+        miss_texts,
+        batch_size=config.max_batch_size,
+        normalize_embeddings=True,
+        show_progress_bar=False,
+    )
+    latency_ms = (time.perf_counter() - t0) * 1000
 
-        t0 = time.perf_counter()
-        response = client.embeddings.create(
-            model=config.embedding_model,
-            input=batch_texts,
+    embeddings_list = [e.tolist() for e in embeddings]
+    cache.mset(miss_texts, embeddings_list)
+
+    total_tokens = sum(_approx_tokens(t) for t in miss_texts)
+    llm_logger.log(
+        request_id=request_id,
+        interaction_type="embedding",
+        model=config.embedding_model,
+        tokens_in=total_tokens,
+        tokens_out=0,
+        cost_usd=0.0,        # local embeddings are free
+        latency_ms=latency_ms,
+        status="success",
+        metadata={"batch_size": len(miss_texts)},
+    )
+
+    per_item_latency = latency_ms / len(miss_texts)
+    for local_i, global_i in enumerate(miss_indices):
+        results[global_i] = EmbeddingResult(
+            chunk_id=chunk_ids[global_i],
+            embedding=embeddings_list[local_i],
+            tokens_used=_approx_tokens(texts[global_i]),
+            cost_usd=0.0,
+            latency_ms=per_item_latency,
+            from_cache=False,
         )
-        latency_ms = (time.perf_counter() - t0) * 1000
-
-        tokens_used = response.usage.total_tokens
-        cost_usd = _cost(tokens_used)
-
-        embeddings = [item.embedding for item in sorted(response.data, key=lambda x: x.index)]
-        cache.mset(batch_texts, embeddings)
-
-        llm_logger.log(
-            request_id=request_id,
-            interaction_type="embedding",
-            model=config.embedding_model,
-            tokens_in=tokens_used,
-            tokens_out=0,
-            cost_usd=cost_usd,
-            latency_ms=latency_ms,
-            status="success",
-            metadata={"batch_size": len(batch_texts), "chunk_ids": batch_chunk_ids},
-        )
-
-        per_item_cost = cost_usd / len(batch_texts)
-        per_item_latency = latency_ms / len(batch_texts)
-
-        for local_i, (global_i, chunk_id, embedding) in enumerate(
-            zip(batch_idx, batch_chunk_ids, embeddings)
-        ):
-            results[global_i] = EmbeddingResult(
-                chunk_id=chunk_id,
-                embedding=embedding,
-                tokens_used=tokens_used // len(batch_texts),
-                cost_usd=per_item_cost,
-                latency_ms=per_item_latency,
-                from_cache=False,
-            )
 
 
 def embed_single(
@@ -132,5 +136,6 @@ def embed_single(
     return results[0]
 
 
-def _cost(tokens: int) -> float:
-    return (tokens / 1000.0) * config.price_per_1k_tokens
+def _approx_tokens(text: str) -> int:
+    """Rough token estimate (~4 chars/token) for usage tracking."""
+    return max(1, len(text) // 4)

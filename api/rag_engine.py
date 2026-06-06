@@ -1,12 +1,11 @@
-"""RAG query pipeline: embed → MMR retrieve → Claude generate → log."""
+"""RAG query pipeline: embed → MMR retrieve → Groq generate → log."""
 from __future__ import annotations
 
 import time
 import uuid
 from dataclasses import dataclass
 
-import anthropic
-import psycopg2
+from groq import AsyncGroq
 
 from embeddings.embedder import embed_single
 from embeddings.embedding_cache import EmbeddingCache
@@ -17,7 +16,9 @@ RAG_SYSTEM_PROMPT = """You are a helpful assistant. Answer the user's question u
 If the context does not contain enough information to answer confidently, say so clearly.
 Be concise. For each fact you state, cite the source_uri of the chunk it came from."""
 
-RAG_SYSTEM_PROMPT_TOKENS_APPROX = 60
+# Groq llama-3.3-70b-versatile published pricing (free tier, rates used for cost tracking).
+GROQ_PRICE_IN_PER_1M = 0.59
+GROQ_PRICE_OUT_PER_1M = 0.79
 
 
 @dataclass
@@ -36,8 +37,8 @@ async def run_rag_query(
     pg_conn,
     cache: EmbeddingCache,
     llm_logger: LLMLogger,
-    anthropic_client: anthropic.AsyncAnthropic,
-    anthropic_model: str,
+    groq_client: AsyncGroq,
+    groq_model: str,
     top_k: int = 5,
     mmr_lambda: float = 0.5,
     request_id: str | None = None,
@@ -88,27 +89,25 @@ async def run_rag_query(
     user_message = f"Context:\n{context}\n\nQuestion: {question}"
 
     t_llm = time.perf_counter()
-    response = await anthropic_client.messages.create(
-        model=anthropic_model,
+    response = await groq_client.chat.completions.create(
+        model=groq_model,
         max_tokens=1024,
-        system=[{
-            "type": "text",
-            "text": RAG_SYSTEM_PROMPT,
-            "cache_control": {"type": "ephemeral"},
-        }],
-        messages=[{"role": "user", "content": user_message}],
+        messages=[
+            {"role": "system", "content": RAG_SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ],
     )
     llm_latency_ms = (time.perf_counter() - t_llm) * 1000
 
-    answer = response.content[0].text if response.content else ""
-    tokens_in = response.usage.input_tokens
-    tokens_out = response.usage.output_tokens
-    rag_cost = _claude_cost(tokens_in, tokens_out, anthropic_model)
+    answer = response.choices[0].message.content if response.choices else ""
+    tokens_in = response.usage.prompt_tokens
+    tokens_out = response.usage.completion_tokens
+    rag_cost = _groq_cost(tokens_in, tokens_out)
 
     llm_logger.log(
         request_id=request_id,
         interaction_type="rag_query",
-        model=anthropic_model,
+        model=groq_model,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         cost_usd=rag_cost,
@@ -159,7 +158,5 @@ def _log_retrieval_metrics(
         conn.rollback()
 
 
-def _claude_cost(tokens_in: int, tokens_out: int, model: str) -> float:
-    if "sonnet" in model:
-        return (tokens_in / 1_000_000) * 3.0 + (tokens_out / 1_000_000) * 15.0
-    return (tokens_in / 1_000_000) * 1.0 + (tokens_out / 1_000_000) * 5.0
+def _groq_cost(tokens_in: int, tokens_out: int) -> float:
+    return (tokens_in / 1_000_000) * GROQ_PRICE_IN_PER_1M + (tokens_out / 1_000_000) * GROQ_PRICE_OUT_PER_1M

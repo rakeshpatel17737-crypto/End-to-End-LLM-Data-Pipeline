@@ -12,8 +12,7 @@ def configure_logging(log_level: str = "INFO") -> None:
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
-            structlog.stdlib.add_logger_name,
-            structlog.stdlib.add_log_level,
+            structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.dev.ConsoleRenderer() if os.getenv("ENVIRONMENT") == "development"
             else structlog.processors.JSONRenderer(),

@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     chunk_index     INT NOT NULL,
     content         TEXT NOT NULL,
     content_hash    TEXT NOT NULL,
-    embedding       vector(1536),
+    embedding       vector(384),
     token_count     INT NOT NULL,
     source_uri      TEXT NOT NULL,
     page_number     INT,

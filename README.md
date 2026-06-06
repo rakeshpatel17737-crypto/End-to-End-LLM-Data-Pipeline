@@ -2,6 +2,8 @@
 
 A production-grade pipeline that ingests raw documents, generates embeddings, serves RAG queries, tracks embedding drift, and logs every LLM interaction with cost tracking — all observable through a live Streamlit dashboard.
 
+> **Runs free.** Embeddings are computed locally with `sentence-transformers` (no API key), and generation + RCA use **Groq's free tier**. You only need one free Groq key.
+
 ---
 
 ## Architecture
@@ -19,7 +21,7 @@ A production-grade pipeline that ingests raw documents, generates embeddings, se
 │               Quality Scorer ──► Dead-Letter Queue (on fail)     │
 │                      │                                            │
 │                      ▼                                            │
-│            Redis Embedding Cache ──► OpenAI API (on miss)        │
+│        Redis Cache ──► sentence-transformers (local, on miss)   │
 │                      │                                            │
 │                      ▼                                            │
 │               pgvector (PostgreSQL 16)                            │
@@ -30,9 +32,9 @@ A production-grade pipeline that ingests raw documents, generates embeddings, se
 │                                                                   │
 │   POST /query                                                     │
 │       │                                                           │
-│       ├──► Embed question (Redis cache → OpenAI)                 │
+│       ├──► Embed question (Redis cache → local model)           │
 │       ├──► MMR Retrieval from pgvector (diversity + relevance)   │
-│       ├──► Claude claude-sonnet-4-6 (prompt caching)             │
+│       ├──► Groq llama-3.3-70b-versatile                          │
 │       └──► Log to DuckDB (tokens, cost, latency, request_id)     │
 └─────────────────────────────────────────────────────────────────┘
 
@@ -44,7 +46,7 @@ A production-grade pipeline that ingests raw documents, generates embeddings, se
 │       ├──► Load 500 baseline embeddings (age > 30 days)          │
 │       ├──► Centroid shift + KS test + Z-score on norms           │
 │       ├──► Health score 0–100                                     │
-│       └──► Claude RCA (if drifting) → log diagnosis              │
+│       └──► Groq RCA (if drifting) → log diagnosis               │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
@@ -68,14 +70,14 @@ A production-grade pipeline that ingests raw documents, generates embeddings, se
 | Ingestion | PyMuPDF (PDF), httpx + BeautifulSoup (web), httpx (API) |
 | Chunking | tiktoken cl100k\_base, 512 tokens, 50-token overlap |
 | Chunk Quality | langdetect, regex PII detection, MinHash dedup |
-| Embeddings | OpenAI `text-embedding-3-small` (1536-dim) |
+| Embeddings | `sentence-transformers` `all-MiniLM-L6-v2` (384-dim, local, free) |
 | Embedding Cache | Redis — SHA-256 keyed, 7-day TTL |
 | Vector Store | PostgreSQL 16 + pgvector (IVFFlat cosine index) |
 | RAG Retrieval | Greedy MMR (Maximal Marginal Relevance) |
-| LLM | Anthropic Claude `claude-sonnet-4-6` with prompt caching |
+| LLM | Groq `llama-3.3-70b-versatile` (free tier) |
 | LLM Warehouse | DuckDB — all interactions, costs, latency |
 | Drift Detection | Centroid shift, KS test, Z-score on embedding norms |
-| RCA | Claude tool use + rule-based fallback (tenacity retry) |
+| RCA | Groq tool use (function calling) + rule-based fallback (tenacity retry) |
 | Dashboard | Streamlit + Plotly |
 | Infrastructure | Docker Compose (7 services) |
 
@@ -104,14 +106,15 @@ cd End-to-End-LLM-Data-Pipeline
 cp .env.example .env
 ```
 
-Edit `.env` and fill in your API keys:
+Edit `.env` and fill in your one free key:
 
 ```
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
-AIRFLOW_FERNET_KEY=   # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-AIRFLOW_SECRET_KEY=   # any random string
+GROQ_API_KEY=gsk_...   # free at https://console.groq.com/keys
+AIRFLOW_FERNET_KEY=    # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+AIRFLOW_SECRET_KEY=    # any random string
 ```
+
+Embeddings run locally — no key required for them.
 
 ### 2. Start all services
 
@@ -131,7 +134,7 @@ make up
 make ingest
 ```
 
-This triggers the Airflow DAG which fetches 3 Wikipedia articles (Apache Airflow, RAG, LLMs), chunks them, embeds via OpenAI, and stores in pgvector.
+This triggers the Airflow DAG which fetches 3 Wikipedia articles (Apache Airflow, RAG, LLMs), chunks them, embeds them locally with sentence-transformers, and stores in pgvector.
 
 ### 4. Run a RAG query
 
@@ -167,13 +170,13 @@ llm-data-platform/
 │   ├── chunker.py                # tiktoken chunking + SHA-256 + MinHash
 │   └── quality_scorer.py         # PII detection, langdetect, dedup
 ├── embeddings/
-│   ├── embedder.py               # OpenAI batch embed + Redis cache + cost log
+│   ├── embedder.py               # Local sentence-transformers + Redis cache + log
 │   ├── vector_store.py           # pgvector upsert + MMR retrieval
 │   └── embedding_cache.py        # Redis SHA-256 cache
 ├── drift/
 │   ├── statistical_tests.py      # KS test, Z-score, KL divergence
 │   ├── embedding_drift_detector.py # Centroid shift, health score 0-100
-│   └── rca_engine.py             # Claude RCA with tool use + fallback
+│   └── rca_engine.py             # Groq RCA with tool use + fallback
 ├── warehouse/
 │   ├── llm_logger.py             # DuckDB writer: all LLM interactions + costs
 │   └── schemas.py                # DuckDB DDL
@@ -203,7 +206,7 @@ llm-data-platform/
 Token-aware sliding window (512 tokens, 50-token overlap) using tiktoken. Each chunk gets SHA-256 fingerprinting for exact dedup and MinHash signatures for near-duplicate detection.
 
 ### Embedding Cache
-Redis cache keyed on SHA-256(chunk text). Identical content across different documents hits the cache — avoids re-calling the OpenAI API and cuts costs significantly on repeated ingestion.
+Redis cache keyed on SHA-256(chunk text). Identical content across different documents hits the cache — avoids recomputing embeddings and speeds up repeated ingestion.
 
 ### MMR Retrieval
 Greedy Maximal Marginal Relevance retrieval balances relevance and diversity. Fetches top-50 by cosine similarity, then iteratively selects chunks that maximize `λ·sim(chunk, query) - (1-λ)·max(sim(chunk, selected))`.
@@ -215,7 +218,7 @@ Every embedding call, RAG query, and RCA analysis is logged to DuckDB with: `req
 Three signals: centroid shift (cosine distance between current and baseline mean), KS test on L2 norm distributions, and Z-score on norm means. Health score 0–100 (adapted from production ML observability patterns).
 
 ### LLM-Powered RCA
-When drift is detected, Claude (`claude-sonnet-4-6`) diagnoses the root cause using structured tool use with prompt caching on the system prompt. Falls back to rule-based diagnosis if the API is unavailable. Cause categories: `topic_distribution_shift`, `data_quality_degradation`, `seasonal_content_shift`, and more.
+When drift is detected, Groq (`llama-3.3-70b-versatile`) diagnoses the root cause using structured function calling. Falls back to rule-based diagnosis if the API is unavailable. Cause categories: `topic_distribution_shift`, `data_quality_degradation`, `seasonal_content_shift`, and more.
 
 ---
 
@@ -255,8 +258,8 @@ make shell-postgres  # psql into PostgreSQL
 
 | Variable | Description |
 |---|---|
-| `OPENAI_API_KEY` | OpenAI API key for embeddings |
-| `ANTHROPIC_API_KEY` | Anthropic API key for RAG + RCA |
+| `GROQ_API_KEY` | Groq API key for RAG answers + drift RCA (free tier) |
+| `GROQ_MODEL` | Groq model name (default: `llama-3.3-70b-versatile`) |
 | `POSTGRES_USER/PASSWORD/DB` | PostgreSQL credentials |
 | `AIRFLOW_FERNET_KEY` | Airflow encryption key |
 | `AIRFLOW_SECRET_KEY` | Airflow webserver secret |
@@ -272,5 +275,7 @@ No Docker required for unit tests:
 pip install tiktoken duckdb numpy langdetect datasketch pytest
 python -m pytest tests/unit/ -v
 ```
+
+The unit tests don't require Groq, sentence-transformers, or Docker — they test the chunker, quality scorer, drift detector, and LLM logger in isolation.
 
 19 tests covering: chunker, quality scorer, drift detector, and LLM logger.

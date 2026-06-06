@@ -147,6 +147,13 @@ def _mmr_diversity(embeddings: list) -> float:
     return float(1.0 - off_diag.mean())
 
 
+def _to_list(vec) -> list[float]:
+    """pgvector returns numpy arrays; convert to native Python list for JSON/XCom."""
+    if hasattr(vec, "tolist"):
+        return vec.tolist()
+    return [float(x) for x in vec]
+
+
 def fetch_embedding_sample(conn, n: int = 500, age_days_max: int = 7) -> list[list[float]]:
     with conn.cursor() as cur:
         cur.execute(
@@ -159,7 +166,7 @@ def fetch_embedding_sample(conn, n: int = 500, age_days_max: int = 7) -> list[li
             """,
             [age_days_max, n],
         )
-        return [row[0] for row in cur.fetchall()]
+        return [_to_list(row[0]) for row in cur.fetchall()]
 
 
 def fetch_baseline_embeddings(conn, n: int = 500, age_days_min: int = 30) -> list[list[float]]:
@@ -174,4 +181,4 @@ def fetch_baseline_embeddings(conn, n: int = 500, age_days_min: int = 30) -> lis
             """,
             [age_days_min, n],
         )
-        return [row[0] for row in cur.fetchall()]
+        return [_to_list(row[0]) for row in cur.fetchall()]
